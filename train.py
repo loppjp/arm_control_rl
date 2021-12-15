@@ -11,22 +11,40 @@ from unityagents import UnityEnvironment
 from A2CAgent import A2CAgent as Agent
 from A2CAgent import A2CModel as Model
 
+#from ReinforceAgentContinuous import ReinforceAgentContinuous as Agent
+#from ReinforceAgentContinuous import ReinforceModelContinuous as Model
+
+#from VanillaPolicyGradient import VanillaPolicyGradientAgent as Agent
+#from VanillaPolicyGradient import VanillaPolicyGradientModel as Model
+
+
+
 # default hypers and constants
 DEFAULT_MAX_TIMESTEPS            = 500
 DEFAULT_NUM_EPISODES             = 1000
 DEFAULT_SCORE_WINDOW_EPISODES    = 100
-DEFAULT_REWARD_SOLUTION_CRITERIA = 100.0
+DEFAULT_REWARD_SOLUTION_CRITERIA = 30.0
 DEFAULT_EPSILON_START            = 0.85
 DEFAULT_EPSILON_END              = 0.05
-DEFAULT_EPSILON_DECAY_FACTOR     = 0.996
+DEFAULT_EPSILON_DECAY_FACTOR     = 0.995
+DEFAULT_BATCH_SIZE               = 16
+DEFAULT_HISTORIES                = 4
+DEFAULT_BOOTSTRAP                = 4
+DEFAULT_EXPERIENCE_BUFFER        = DEFAULT_BATCH_SIZE * 512
 
 DEFAULT_MULTI_AGENT              = False
 
 TRAINING_PARAMS = {
-    "BATCH_SIZE":              64,
+    "BATCH_SIZE":              DEFAULT_BATCH_SIZE,
+    "HISTORIES":               DEFAULT_HISTORIES,
+    "BOOTSTRAP":               DEFAULT_BOOTSTRAP,
+    "EXPERIENCE_BUFFER":       DEFAULT_EXPERIENCE_BUFFER,
     "GAMMA":                   0.95,
     "TAU":                     1e-2,
+    #"TAU":                     1e-1,
     "LEARNING_RATE":           1e-3,
+    #"LEARNING_RATE":           1e-5,
+    #"LEARNING_RATE":           1e-0,
     "UPDATE_TARGET_NET_STEPS": 4,
     "SEED":                    int(1234),
     "MODE":                    "TRAIN"
@@ -77,10 +95,11 @@ def train(
         max_timesteps : int             = DEFAULT_MAX_TIMESTEPS,
         num_episodes : int              = DEFAULT_NUM_EPISODES,
         score_window_episodes : int     = DEFAULT_SCORE_WINDOW_EPISODES,
-        reward_solution_critera : float = DEFAULT_REWARD_SOLUTION_CRITERIA,
+        reward_solution_criteria : float = DEFAULT_REWARD_SOLUTION_CRITERIA,
         epsilon_start : float           = DEFAULT_EPSILON_START,
         epsilon_end : float             = DEFAULT_EPSILON_END,
-        epsilon_decay : float           = DEFAULT_EPSILON_DECAY_FACTOR
+        epsilon_decay : float           = DEFAULT_EPSILON_DECAY_FACTOR,
+        experience_buffer : int         = DEFAULT_EXPERIENCE_BUFFER,
 ) -> dict:
 
     """
@@ -89,7 +108,7 @@ def train(
     args:
         env - the UnityEnvironment to use for training
         score_window_size - last N scores to average in rolling window
-        reward_solution_critera - The reward value that represents that the 
+        reward_solution_criteria - The reward value that represents that the 
                                   environment has been solved
         epsilon_start (float): starting value of epsilon, for epsilon-greedy action selection
         epsilon_end (float): minimum value of epsilon
@@ -132,6 +151,8 @@ def train(
 
     action_size = env.brains[brain_key].vector_action_space_size
 
+    TRAINING_PARAMS["EXPERIENCE_BUFFER"] = experience_buffer
+
     model = Model(
         state_size,
         action_size,
@@ -144,16 +165,22 @@ def train(
     for brain_name in all_brain_info:
 
         # instantiation and storage for the agent
-        agent_dict[brain_name] = AgentData(agent=Agent(state_size, action_size, model))
-
-    agent_episode_data = {
-        brain_name: AgentEpisodeData() for brain_name in all_brain_info
-    }
+        agent_dict[brain_name] = AgentData(
+            agent=Agent(
+                model,
+            )
+        )
 
     # training loop:
     for episode in range(1, num_episodes+1):
 
         all_brain_info = reset_and_describe_environment(env, train_mode=True)
+
+        score = 0
+
+        agent_episode_data = {
+            brain_name: AgentEpisodeData() for brain_name in all_brain_info
+        }
 
         # timesteps
         for t in range(max_timesteps):
@@ -173,20 +200,12 @@ def train(
 
                     step_actions[brain_name] = action
 
+                    assert len(action) == action_size
+
                 # else, no action taken for done agants, seems like None is ok in many cases
 
 
             # step the environment for all agents
-            #print(f"step_actions: {step_actions}")
-            #print(f"step_actions.shape: {step_actions[list(step_actions.keys())[0]].shape}")
-
-            # update the environment if any agent took a step
-            #print(f".tems(): {[item == True for item in step_actions.items()]}")
-
-            #print(f"step_actions: {step_actions}")
-            #print(f"things1: {[x != None for x in list(step_actions.values())]}")
-            #print(f"things:  {[x != None for x in list(step_actions.values())]}")
-            #if any([item != None for item in step_actions.items()]):
             if len(step_actions) > 0:
 
                 next_all_brain_info = env.step(step_actions)
@@ -246,8 +265,9 @@ def train(
             print('\rEpisode {}\tAverage Score: {:.2f}\tMax Score: {:.2f}\teps: {:.2f}'.format(
                 episode, np.mean(scores_window), max_score, epsilon), end="\r"
             )
+            pass
 
-        if np.mean(scores_window) >= reward_solution_critera:
+        if np.mean(scores_window) >= reward_solution_criteria:
             consecutive += 1
         else:
             consecutive = 0
@@ -270,8 +290,9 @@ def main(
     epsilon_end: float                = DEFAULT_EPSILON_END,
     epsilon_decay: float              = DEFAULT_EPSILON_DECAY_FACTOR,
     multi_agent: bool                 = DEFAULT_MULTI_AGENT,
+    experience_buffer: int            = DEFAULT_EXPERIENCE_BUFFER,
     model_name: str                   = "model",
-    do_not_save:bool  = False
+    do_not_save:bool                  = False,
 ) -> None:
     """
     Outerloop for training function. 
@@ -288,13 +309,14 @@ def main(
 
     scores = train(
         env,
-        max_timesteps,
-        num_episodes,
-        score_window_episodes,
-        reward_solution_criteria,
-        epsilon_start,
-        epsilon_end,
-        epsilon_decay,
+        max_timesteps=max_timesteps,
+        num_episodes=num_episodes,
+        score_window_episodes=score_window_episodes,
+        reward_solution_criteria=reward_solution_criteria,
+        epsilon_start=epsilon_start,
+        epsilon_end=epsilon_end,
+        epsilon_decay=epsilon_decay,
+        experience_buffer=experience_buffer,
     )
 
     if not do_not_save:
@@ -398,6 +420,15 @@ if __name__ == '__main__':
     )
 
     parser.add_argument(
+        '-b',
+        '--experience-buffer',
+        help= 'The length of the experience replay buffer ' + \
+             f'defaults to {DEFAULT_EXPERIENCE_BUFFER}',
+        default=DEFAULT_EXPERIENCE_BUFFER,
+        type=int
+    )
+
+    parser.add_argument(
         '-m',
         '--multi-agent',
         help= 'Optional parameter to enable multi-agent training ' + \
@@ -417,13 +448,14 @@ if __name__ == '__main__':
     args = parser.parse_args()
 
     main(
-        args.max_timesteps,
-        args.num_episodes,
-        args.score_window_episodes,
-        args.reward_solution_criteria,
-        args.epsilon_start,
-        args.epsilon_end,
-        args.epsilon_decay,
-        args.multi_agent,
-        args.do_not_save,
+        max_timesteps=args.max_timesteps,
+        num_episodes=args.num_episodes,
+        score_window_episodes=args.score_window_episodes,
+        reward_solution_criteria=args.reward_solution_criteria,
+        epsilon_start=args.epsilon_start,
+        epsilon_end=args.epsilon_end,
+        epsilon_decay=args.epsilon_decay,
+        experience_buffer=args.experience_buffer,
+        multi_agent=args.multi_agent,
+        do_not_save=args.do_not_save,
     )

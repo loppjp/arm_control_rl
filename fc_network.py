@@ -1,4 +1,7 @@
+from typing import List, Callable
+
 from numpy.core.defchararray import add
+from numpy.lib.arraysetops import isin
 import torch
 from torch  import nn
 import torch.nn.functional as F
@@ -8,12 +11,25 @@ device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 class Network(nn.Module):
 
     def __init__(self, 
-        input_size:int, 
-        output_size:int, 
-        seed:int,
-        add_sigmoid: bool = False,
-        add_tanh: bool = False,
-        batch_size: float = 1
+        input_size:int=1, 
+        output_size:int=1, 
+        cat_size:int=0,
+        #hidden_layers=[64,32,32,16],
+        #hidden_layers=[32,32,16],
+        hidden_layers=[128,64,64,32],
+        #hidden_layers=[256,256],
+        #hidden_layers:List[int]=[256,256,128,128,64,64,32],
+        seed:int=1234,
+        internal_activation_fn:Callable=F.leaky_relu,
+        #internal_activation_fn=F.linear,
+        #internal_activation_fn=None,
+        #output_activation_fn=torch.tanh,
+        output_activation_fn:Callable=torch.sigmoid,
+        #output_activation_fn=F.linear,
+        #output_activation_fn=F.leaky_relu,
+        #output_activation_fn=None,
+        batch_size:int = 1,
+        layer_norm:bool=True
     ):
         """
         Instantiate Neural Network to approximate action value function
@@ -26,49 +42,72 @@ class Network(nn.Module):
             seed (int): Random seed for reproducability 
         """
         super().__init__()
+        assert(len(hidden_layers) > 0)
         self.seed = torch.manual_seed(seed)
-        self.add_sigmoid = add_sigmoid
         self.batch_size = batch_size
-        self.add_tanh = add_tanh
+        self.hidden_layers = hidden_layers
+
+        self.batch_norm_layers = []
+        self.network_layers = []
+
+        self.internal_activation_fn = internal_activation_fn
+        self.output_activation_fn = output_activation_fn
+
+        self.layer_norm = layer_norm
 
         """
         Deep network with batch normalization 
         between fully connected layers
         """
-        
-        self.fc1 = nn.Linear(input_size, 128)
+
+        for layer_idx, _ in enumerate(self.hidden_layers):
+
+            # if this is the input layer
+            if layer_idx == 0:
+
+                #if self.layer_norm: self.network_layers.append(nn.LayerNorm(input_size + cat_size))
+
+                if batch_size > 1:
+                    self.batch_norm_layers.append(nn.BatchNorm1d(input_size + cat_size))
+
+                self.network_layers.append(nn.Linear(input_size + cat_size, self.hidden_layers[0]))
+
+                #if self.layer_norm: self.network_layers.append(nn.LayerNorm(self.hidden_layers[0]))
+
+
+            # this is an internal layer
+            else:
+
+                if batch_size > 1:
+                    self.batch_norm_layers.append(nn.BatchNorm1d(self.hidden_layers[layer_idx-1]))
+
+                self.network_layers.append(nn.Linear(self.hidden_layers[layer_idx-1], self.hidden_layers[layer_idx]))
+
+                #if self.layer_norm: self.network_layers.append(nn.LayerNorm(self.hidden_layers[layer_idx]))
 
         if batch_size > 1:
-            self.bn1 = nn.BatchNorm1d(128)
+            self.batch_norm_layers.append(nn.BatchNorm1d(self.hidden_layers[-1]))
+
+        #if layer_idx == len(self.hidden_layers):
+        #    self.network_layers.append(nn.Linear(input_size + cat_size, self.hidden_layers[0]))
+
+        #else:
+        #self.network_layers.append(nn.Linear(self.hidden_layers[layer_idx-1], self.hidden_layers[layer_idx]))
+
+        self.network_layers.append(nn.Linear(self.hidden_layers[-1], output_size))
+
+        #if batch_size > 1:
+        #    self.batch_norm_layers.append(nn.BatchNorm1d(self.hidden_layers[layer_idx]))
+
+        #if self.layer_norm: self.network_layers.append(nn.LayerNorm(output_size))
 
 
-        self.fc2 = nn.Linear(128, 64)
-
-        if batch_size > 1:
-            self.bn2 = nn.BatchNorm1d(64)
-
-
-        self.fc3 = nn.Linear(64, 64)
-
-        if batch_size > 1:
-            self.bn3 = nn.BatchNorm1d(64)
-
-
-        self.fc4 = nn.Linear(64, 32)
-
-        if batch_size > 1:
-            self.bn4 = nn.BatchNorm1d(32)
-
-
-        self.fc5 = nn.Linear(32, output_size)
-
-        self.sigmoid = nn.Sigmoid()
-
-        self.tanh = nn.Tanh()
+        self.batch_norm_layers = nn.ModuleList(self.batch_norm_layers)
+        self.network_layers = nn.ModuleList(self.network_layers)
 
 
 
-    def forward(self, state):
+    def forward(self, x, action=None):
         """
         Perform a forward propagation inference on environment state vector
 
@@ -78,48 +117,40 @@ class Network(nn.Module):
         Returns - action value
         """
 
-        x = self.fc1(state)
-        
-        if self.batch_size > 1:
-            x = self.bn1(x)
+        # activate state before concattonation
+        if self.internal_activation_fn:
+            x = self.internal_activation_fn(x)
 
-        x = F.leaky_relu(x)
+        # if actions were supplied.. 
+        if action is not None:
 
+            # concatonate the actions on the 1st deminsion
+            x = torch.cat((x, action), dim=1)
 
-        
-        x = self.fc2(x)
+        # for each layer
+        for layer_idx, layer in enumerate(self.network_layers):
 
-        if self.batch_size > 1:
-            x = self.bn2(x)
+            # if batch size is greater than 1
+            if self.batch_size > 1:
 
-        x = F.leaky_relu(x)
+                # apply batch normalization
+                x = self.batch_norm_layers[layer_idx](x)
 
+            # apply the layer update
+            x = layer(x)
 
-        
-        x = self.fc3(x)
+            # if this is the last layer
 
-        if self.batch_size > 1:
-            x = self.bn3(x)
+            # this is an internal layer
+            if self.internal_activation_fn and not isinstance(layer, nn.BatchNorm1d):
 
-        x = F.leaky_relu(x)
+                # Applay the internal activation function
+                x = self.internal_activation_fn(x)
 
+            if layer_idx == (len(self.network_layers) - 1):
 
-        
-        x = self.fc4(x)
+                # apply the output activation function
+                x = self.output_activation_fn(x)
 
-        if self.batch_size > 1:
-            x = self.bn4(x)
-
-        x = F.leaky_relu(x)
-        
-
-
-        x = self.fc5(x)       
-
-        if self.add_sigmoid:
-            x = self.sigmoid(x)
-
-        if self.add_tanh:
-            x = self.tanh(x)
 
         return x
