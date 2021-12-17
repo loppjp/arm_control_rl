@@ -148,13 +148,11 @@ class ExperienceBuffer:
         # state_space
         # 1
 
-        states = np.array([x.get_state() for x in experiences[0:self.history_len]])
+        states = np.vstack([x.get_state() for x in experiences[0:self.history_len]]).flatten()
 
-        action = np.array((experiences[self.history_len - 1].get_action()))
+        action = np.array(experiences[-1].get_action())
 
-        next_states = np.array([x.get_next_state() for x in experiences[self.history_len:]])
-
-        dones = np.array((any([x.get_done() for x in experiences[self.history_len - 1:]])))
+        next_states = np.vstack([x.get_next_state() for x in experiences[(-1-self.history_len):-1]]).flatten()
 
         # inspired by the n-step bootstrapping code here:
         # https://github.com/ShangtongZhang/DeepRL/blob/master/deep_rl/component/replay.py
@@ -165,7 +163,13 @@ class ExperienceBuffer:
             reward = _reward + _done * self.gamma * reward
             done = _done and done
 
-        return ExperienceSample(states, action, reward, next_states, done)
+        return ExperienceSample(
+            states,
+            action, 
+            reward, 
+            next_states, 
+            done
+        )
 
     def sample(self) -> Tuple[Tensor]:
 
@@ -174,19 +178,19 @@ class ExperienceBuffer:
         sampled = (
             torch.from_numpy(
                 experience_batch.get_states()
-            ),
+            ).float().to(device),
             torch.from_numpy(
                 experience_batch.get_actions()
-            ),
+            ).float().to(device),
             torch.from_numpy(
                 experience_batch.get_rewards()
-            ),
+            ).float().to(device),
             torch.from_numpy(
                 experience_batch.get_next_states()
-            ),
+            ).float().to(device),
             torch.from_numpy(
                 experience_batch.get_dones()
-            )
+            ).int().to(device)
         )
 
         return sampled

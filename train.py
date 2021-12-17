@@ -200,7 +200,7 @@ def train(
 
                     step_actions[brain_name] = action
 
-                    assert len(action) == action_size
+                    assert action.shape[1] == action_size
 
                 # else, no action taken for done agants, seems like None is ok in many cases
 

@@ -1,5 +1,6 @@
 from math import exp
 import random
+from collections import deque
 
 import numpy as np
 import torch
@@ -21,6 +22,11 @@ class A2CModel:
         self.histories = training_params["HISTORIES"]
         self.bootstrap = training_params["BOOTSTRAP"]
         self.training_params = training_params
+        self.state_history_queue = deque(maxlen=self.histories)
+
+        randgen = lambda: 2 * (np.random.random_sample((1, self.state_size)) - 0.5)
+
+        [self.state_history_queue.append(randgen()) for x in range(0, self.histories)]
 
         self.mode = self.training_params["MODE"]
 
@@ -80,7 +86,12 @@ class A2CModel:
         Sample the policy network by accessing its final output layer
         """
 
-        state_tensor = torch.from_numpy((np.expand_dims(state, 0))).float().to(device)
+        self.state_history_queue.append(state)
+
+        squeezed = np.vstack(np.array(list(self.state_history_queue)))
+
+        # adjust for batch size on axis 1
+        state_tensor = torch.from_numpy(np.expand_dims(squeezed, 0)).float().flatten(1).to(device)
 
         self.policy_net.eval()
 
@@ -264,7 +275,7 @@ class A2CAgent:
         # epsilon starts out high, explore
         action = None
         if np.random.random() < epsilon: 
-            action = np.random.random(self.action_size)            
+            action = np.random.random((1, self.action_size))
 
             # undesired, scale the action space from -1 to 1
             # itd be nice to get this from the environment..maybe you can
