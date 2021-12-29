@@ -1,7 +1,5 @@
 from typing import List, Callable
 
-from numpy.core.defchararray import add
-from numpy.lib.arraysetops import isin
 import torch
 from torch  import nn
 import torch.nn.functional as F
@@ -16,8 +14,16 @@ class Network(nn.Module):
         cat_size:int=0,
         #hidden_layers=[64,32,32,16],
         #hidden_layers=[32,32,16],
-        hidden_layers=[128,64,64,32],
-        #hidden_layers=[256,256],
+        #hidden_layers=[32,32],
+        #hidden_layers=[64,64],
+        #hidden_layers=[128,64,64,32],
+        #hidden_layers=[256,256,128,128],
+        #hidden_layers=[64,64],
+        #hidden_layers=[128,128],
+        hidden_layers=[256,256],
+        #hidden_layers=[512,512],
+        #hidden_layers=[128,128,128],
+        #hidden_layers=[256,256,256,256],
         #hidden_layers:List[int]=[256,256,128,128,64,64,32],
         seed:int=1234,
         internal_activation_fn:Callable=F.leaky_relu,

@@ -1,4 +1,5 @@
 from collections import deque
+from math import exp
 from numbers import Number
 import random
 
@@ -7,9 +8,17 @@ from typing import NamedTuple, Tuple, List
 import numpy as np
 import torch
 from torch._C import _TensorBase
-from torch.functional import Tensor
+from torch import Tensor
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+
+DEBUG_REWARD_SEARCH=False
+DEBUG_LEARNING_REWARD=False
+
+DEBUG= {
+    "REWARD_SEARCH":False,
+    "LEARNING_REWARD":False
+}
 
 class Experience(NamedTuple):
     state:Tuple[float]=None
@@ -71,7 +80,9 @@ class ExperienceBuffer:
             seed: for random generator
         """
 
-        self.memory = deque(maxlen=buffer_length)
+        self.buffer_len=buffer_length
+        self.memory = deque(maxlen=self.buffer_len)
+        self.rewarding_idicies= deque(maxlen=1024)        
         self.seed = random.seed(seed)
         self.state_conversion = state_conversion
         self.action_conversion = action_conversion
@@ -86,29 +97,144 @@ class ExperienceBuffer:
 
         self.prebatch = []
 
+
+        #debug
+        self.idx = 0
+
+
+    def _get_valid_indicies(self):
+
+       low_idx = self.history_len - 1 
+       hi_idx = len(self.memory) - (self.bootstrap_steps - 1)
+
+       valid_indicies = [x for x in range(low_idx, hi_idx)]
+
+       return valid_indicies
+
+
     def add_single(self, experience:Experience) -> None:
 
         self.memory.append(experience)
 
-    def _valid_sample(self, memory, idx):
+        self._track_rewarding_indices(experience)
 
-        return (idx - self.history_len) > 0 and (idx + self.bootstrap_steps) > 1
+
+    def _track_rewarding_indices(self, experience:Experience) -> None:
+
+        if len(self.memory) > self.buffer_len:
+
+            self.rewarding_idicies = [x - 1 for x in list(self.rewarding_idicies)]
+
+        if experience.get_reward() > 0.0:
+
+            self.rewarding_idicies.append(len(self.memory) - 1)
+
+
+    def _valid_sample(self, idx):
+
+        history_inbounds = (idx - (self.history_len - 1)) > -1 and idx < len(self.memory)
+
+        bootstrap_inbounds = idx > -1 and idx + (self.bootstrap_steps - 1) < len(self.memory)
+
+        return history_inbounds and bootstrap_inbounds
+               
+
 
     def _try_get_valid_sample(self) -> Experience:
 
-        if len(self.memory) < self.history_len + self.bootstrap_steps:
+        if len(self.memory) < ((self.history_len - 1) + (self.bootstrap_steps - 1) + 1):
 
             raise ExperienceNotReady("not enough histories")
         
         else:
 
-            idx = random.randrange(0, len(self.memory))
+            return random.choice(self._get_valid_indicies())
 
-            while not self._valid_sample(self.memory, idx):
+            #idx = random.randrange(0, len(self.memory))
 
-                idx = random.randrange(0, len(self.memory))
+            #while not self._valid_sample(idx):
 
-            return idx
+            #    idx = random.randrange(0, len(self.memory))
+
+            #return idx
+
+    def _get_random_experience(self) -> List[Experience]:
+
+        idx = self._try_get_valid_sample()
+
+        self.idx = idx
+
+        experience:List[Experience] = self._get_experices(idx)
+
+        return experience
+
+    
+    def _get_reward_weighted_sample(
+            self,
+        ):
+
+        if random.random() < 0.5 or len(self.rewarding_idicies) < 1:
+
+            return self._get_random_experience()
+
+        else:
+
+            result_set = set(self._get_valid_indicies()) & set(self.rewarding_idicies)
+
+            if not result_set:
+                raise ExperienceNotReady("not enough histories to produce reward weighted sample")
+
+            idx = random.choice(list(result_set))
+
+            return self._get_experices(idx)
+
+
+    def _get_random_sample(
+            self, 
+            force_reward=True,
+            attempts=1) -> List[Experience]:
+
+        _attempts = attempts
+
+        reward_sum = 0
+
+        while force_reward and _attempts > 0:
+
+            experiences = self._get_random_experience()
+
+            reward_sum = sum([x.get_reward() for x in experiences])
+
+            if reward_sum > 0:
+
+                if DEBUG["REWARD_SEARCH"]:
+                    print("found reward")
+
+                return experiences
+
+            _attempts = _attempts - 1
+
+        if DEBUG["REWARD_SEARCH"] and force_reward and _attempts <= 0 and reward_sum <= 0:
+
+            print("failed to find usable reward")
+            
+
+        # get a random experience.. despite presence of reward signal
+        return self._get_random_experience()
+
+    
+    def _get_experices(self, idx) -> List[Experience]:
+
+        if self.history_len == 1 and self.bootstrap_steps == 1:
+            return [self.memory[idx]]
+        elif self.bootstrap_steps == 1:
+            return list(self.memory)[
+                idx - (self.history_len + 1) : idx + 1
+            ]
+        else:
+            return list(self.memory)[
+                idx - (self.history_len - 1) : idx + (self.bootstrap_steps)
+            ]
+
 
     def _get_sample_batch(self) -> ExperienceSample:
 
@@ -134,13 +260,12 @@ class ExperienceBuffer:
             dones
         )
 
+
     def _get_single_sample(self) -> ExperienceSample:
 
-        idx = self._try_get_valid_sample()
+        experiences:List[Experience] = self._get_reward_weighted_sample()
 
-        experiences:List[Experience] = list(self.memory)[
-            idx - (self.history_len + 1) : idx + (self.bootstrap_steps)
-        ]
+        assert len(experiences) > 0, "need non 0 number of samples"
 
         # history_len x state_space
         # action_space
@@ -150,18 +275,30 @@ class ExperienceBuffer:
 
         states = np.vstack([x.get_state() for x in experiences[0:self.history_len]]).flatten()
 
-        action = np.array(experiences[-1].get_action())
+        action = np.array(experiences[self.history_len-1].get_action())
 
-        next_states = np.vstack([x.get_next_state() for x in experiences[(-1-self.history_len):-1]]).flatten()
+        #debug
+        debug_rewards = [x.get_reward() for x in experiences]
+
+        if len(experiences) == 1:
+            next_states = np.vstack([x.get_next_state() for x in experiences]).flatten()
+        else:
+            next_states = np.vstack([x.get_next_state() for x in experiences[self.history_len:]]).flatten()
 
         # inspired by the n-step bootstrapping code here:
         # https://github.com/ShangtongZhang/DeepRL/blob/master/deep_rl/component/replay.py
-        ecils = slice( None, -1 , self.history_len - 1 )
+        ecils = slice( self.history_len - 1, None, 1 )
         reward = 0
         done = 1
+        #for _reward, _done in zip([x.get_reward() for x in experiences[ecils]], [x.get_done() for x in experiences[ecils]]):
         for _reward, _done in zip([x.get_reward() for x in experiences[ecils]], [x.get_done() for x in experiences[ecils]]):
-            reward = _reward + _done * self.gamma * reward
+            reward = reward + self.gamma * _reward * (1 - int(_done))
             done = _done and done
+
+        if DEBUG["LEARNING_REWARD"]:
+            with np.printoptions(
+                formatter={'float': '{:+2.6f}'.format}
+                ): print(f" learning reward: {reward} ")
 
         return ExperienceSample(
             states,
@@ -170,6 +307,7 @@ class ExperienceBuffer:
             next_states, 
             done
         )
+
 
     def sample(self) -> Tuple[Tensor]:
 

@@ -8,46 +8,98 @@ import numpy as np
 
 from unityagents import UnityEnvironment
 
-from A2CAgent import A2CAgent as Agent
-from A2CAgent import A2CModel as Model
-
-#from ReinforceAgentContinuous import ReinforceAgentContinuous as Agent
-#from ReinforceAgentContinuous import ReinforceModelContinuous as Model
-
-#from VanillaPolicyGradient import VanillaPolicyGradientAgent as Agent
-#from VanillaPolicyGradient import VanillaPolicyGradientModel as Model
-
+from DDPGAgent import DDPGAgent as Agent
+from DDPGAgent import DDPGModel as Model
 
 
 # default hypers and constants
 DEFAULT_MAX_TIMESTEPS            = 500
 DEFAULT_NUM_EPISODES             = 1000
 DEFAULT_SCORE_WINDOW_EPISODES    = 100
+DEFAULT_STEP_SCORE_WINDOW        = 2000
 DEFAULT_REWARD_SOLUTION_CRITERIA = 30.0
-DEFAULT_EPSILON_START            = 0.85
-DEFAULT_EPSILON_END              = 0.05
-DEFAULT_EPSILON_DECAY_FACTOR     = 0.995
-DEFAULT_BATCH_SIZE               = 16
-DEFAULT_HISTORIES                = 4
-DEFAULT_BOOTSTRAP                = 4
-DEFAULT_EXPERIENCE_BUFFER        = DEFAULT_BATCH_SIZE * 512
+
+#DEFAULT_EPSILON_START            = 0.85
+#DEFAULT_EPSILON_START            = 0.5
+DEFAULT_EPSILON_START            = 0.3
+#DEFAULT_EPSILON_START            = 0.5
+
+#DEFAULT_EPSILON_END              = 0.01
+#DEFAULT_EPSILON_END              = 0.05
+DEFAULT_EPSILON_END              = 0.025
+
+#DEFAULT_EPSILON_DECAY_FACTOR     = 0.995
+#DEFAULT_EPSILON_DECAY_FACTOR     = 0.99
+DEFAULT_EPSILON_DECAY_FACTOR     = 0.95
+#DEFAULT_EPSILON_DECAY_FACTOR     = 0.9
+
+#DEFAULT_BATCH_SIZE               = 2
+#DEFAULT_BATCH_SIZE               = 8
+#DEFAULT_BATCH_SIZE               = 16
+DEFAULT_BATCH_SIZE               = 256
+
+DEFAULT_HISTORIES                = 1
+#DEFAULT_HISTORIES                = 2
+#DEFAULT_HISTORIES                = 4
+#DEFAULT_HISTORIES                = 8
+#DEFAULT_HISTORIES                = 16
+
+DEFAULT_BOOTSTRAP                = 1
+#DEFAULT_BOOTSTRAP                = 2
+#DEFAULT_BOOTSTRAP                = 4
+#DEFAULT_BOOTSTRAP                = 8
+#DEFAULT_BOOTSTRAP                = 16
+#DEFAULT_BOOTSTRAP                = 32
+#DEFAULT_BOOTSTRAP                = 64
+
+DEFAULT_EXPERIENCE_BUFFER        = 128 * 1024
+#DEFAULT_TARGET_UPDATE_INTERVAL   = 1
+DEFAULT_ONLINE_UPDATE_INTERVAL   = 1
+
+
+DEFAULT_TRAIN_INTERVAL_STEPS     = 1
+#DEFAULT_TRAIN_INTERVAL_STEPS     = 16
+#DEFAULT_TRAIN_INTERVAL_STEPS     = 32
+#DEFAULT_TRAIN_INTERVAL_STEPS     = 256 
+
+DEFAULT_TRAIN_PASSES             = 8
+#DEFAULT_TRAIN_PASSES             = 64
+#DEFAULT_TRAIN_PASSES             = 128
+#DEFAULT_TRAIN_PASSES             = 256
 
 DEFAULT_MULTI_AGENT              = False
+
+DEFAULT_LEARN_START_STEPS        = 1500
+
+DEFAULT_POLICY_NOISE             = 0.2
 
 TRAINING_PARAMS = {
     "BATCH_SIZE":              DEFAULT_BATCH_SIZE,
     "HISTORIES":               DEFAULT_HISTORIES,
     "BOOTSTRAP":               DEFAULT_BOOTSTRAP,
     "EXPERIENCE_BUFFER":       DEFAULT_EXPERIENCE_BUFFER,
+    #"GAMMA":                   0.9,
     "GAMMA":                   0.95,
-    "TAU":                     1e-2,
+
+    "TAU":                      2e-2,
     #"TAU":                     1e-1,
+    #"TAU":                     1e-2,
+    #"TAU":                     5e-1,
+    #"TAU":                     1,
+    #"TAU":                     1e-1,
+
     "LEARNING_RATE":           1e-3,
+    #"LEARNING_RATE":           5e-4,
+    #"LEARNING_RATE":           1e-4,
     #"LEARNING_RATE":           1e-5,
     #"LEARNING_RATE":           1e-0,
-    "UPDATE_TARGET_NET_STEPS": 4,
+    "UPDATE_ONLINE_STEPS":     DEFAULT_ONLINE_UPDATE_INTERVAL,
+    "TRAIN_INTERVAL_STEPS":    DEFAULT_TRAIN_INTERVAL_STEPS,
+    "TRAIN_PASSES":            DEFAULT_TRAIN_PASSES,
     "SEED":                    int(1234),
-    "MODE":                    "TRAIN"
+    "MODE":                    "TRAIN",
+    "LEARN_START":             DEFAULT_LEARN_START_STEPS,
+    "POLICY_NOISE":            DEFAULT_POLICY_NOISE
 }
 
 
@@ -90,16 +142,17 @@ class AgentEpisodeData(NamedTuple):
     episode_score: float = 0.0
 
 
-def train(
+def train_eval(
         env: UnityEnvironment,
-        max_timesteps : int             = DEFAULT_MAX_TIMESTEPS,
-        num_episodes : int              = DEFAULT_NUM_EPISODES,
-        score_window_episodes : int     = DEFAULT_SCORE_WINDOW_EPISODES,
+        max_timesteps : int              = DEFAULT_MAX_TIMESTEPS,
+        num_episodes : int               = DEFAULT_NUM_EPISODES,
+        score_window_episodes : int      = DEFAULT_SCORE_WINDOW_EPISODES,
         reward_solution_criteria : float = DEFAULT_REWARD_SOLUTION_CRITERIA,
-        epsilon_start : float           = DEFAULT_EPSILON_START,
-        epsilon_end : float             = DEFAULT_EPSILON_END,
-        epsilon_decay : float           = DEFAULT_EPSILON_DECAY_FACTOR,
-        experience_buffer : int         = DEFAULT_EXPERIENCE_BUFFER,
+        epsilon_start : float            = DEFAULT_EPSILON_START,
+        epsilon_end : float              = DEFAULT_EPSILON_END,
+        epsilon_decay : float            = DEFAULT_EPSILON_DECAY_FACTOR,
+        experience_buffer : int          = DEFAULT_EXPERIENCE_BUFFER,
+        do_not_save:bool                 = False,
 ) -> dict:
 
     """
@@ -122,6 +175,10 @@ def train(
     scores = []         # list containing scores from each episode
 
     scores_window = deque(maxlen=score_window_episodes)
+    average_score_window = []
+
+    # track scores per step
+    step_score_window = deque(maxlen=DEFAULT_STEP_SCORE_WINDOW)
 
     max_score = 0 # the maximum reward acheived
 
@@ -153,6 +210,7 @@ def train(
 
     TRAINING_PARAMS["EXPERIENCE_BUFFER"] = experience_buffer
 
+    # only instantiate 1 model for now
     model = Model(
         state_size,
         action_size,
@@ -203,6 +261,8 @@ def train(
                     assert action.shape[1] == action_size
 
                 # else, no action taken for done agants, seems like None is ok in many cases
+                else:
+                    print("act done")
 
 
             # step the environment for all agents
@@ -216,13 +276,20 @@ def train(
                     # update agents that were done at the beggining of this timestep
                     if not all_brain_info[brain_name].local_done[0]:
 
+                        reward = next_all_brain_info[brain_name].rewards[0]
+
+                        step_score_window.append(reward)
+
                         agent_dict[brain_name].agent.step(
                             all_brain_info[brain_name].vector_observations[0], # state
                             step_actions[brain_name], # action
                             next_all_brain_info[brain_name].rewards[0], # reward
                             next_all_brain_info[brain_name].vector_observations[0], # next state
-                            next_all_brain_info[brain_name].local_done[0], # next state
+                            next_all_brain_info[brain_name].local_done[0], # done
                         )
+
+                    else:
+                        print("step done")
 
 
                 # update agent scores
@@ -235,6 +302,10 @@ def train(
                             agent_episode_data[brain_name].episode_score + next_all_brain_info[brain_name].rewards[0]
                         )
 
+                    else:
+
+                        print("done agent episode data")
+
                 # stop this episode if all the brains have reached a local done
                 if all([all_brain_info[brain_name].local_done[0] for brain_name in all_brain_info]): break
 
@@ -244,6 +315,19 @@ def train(
             else:
 
                 break # episode is done since we no agents took steps
+
+            print(f"Step {t:3d}/{max_timesteps}", end="")
+            print(f"\tEpisode {episode}/{num_episodes}", end="")
+            if len(scores_window) > 0:
+                print(f"\tAverage Score: {np.mean(scores_window):.2f}", end="")
+                print(f"\tMaxScore: {np.max(max_score):.2f}", end="")
+            else:
+                print(f"\tAverage Score: {0:.2f}", end="")
+                print(f"\tMaxScore: {0:.2f}", end="")
+            if len(step_score_window) > 100:
+                print(f"\tAvg Step Score-100: {np.mean(list(step_score_window)[-100:]):.6f}", end="")
+                print(f"\tStd Dev Step Score-100: {np.std(list(step_score_window)[-100:]):.6f}", end="")
+            print(f"\teps: {epsilon:.2f}", end="\r")
 
 
         # the minimum score over all agents is used for criteria computation
@@ -257,15 +341,19 @@ def train(
         # update epsilon
         epsilon = max(epsilon_end, epsilon_decay * epsilon)
 
-        print('\rEpisode {}\tAverage Score: {:.2f}\tMax Score: {:.2f}\teps: {:.2f}'.format(
-            episode, np.mean(scores_window), max_score, epsilon), end="\r"
-        )
+        #print(f"                          ", end="")
+        #print(f"Episode {episode}/{num_episodes}", end="")
+        #print(f"\tAverage Score: {np.mean(scores_window):.2f}", end="")
+        #print(f"\tMaxScore: {max_score:.2f}", end="")
+        #print(f"\teps: {epsilon:.2f}", end="\r")
 
-        if episode % 100 == 0:
-            print('\rEpisode {}\tAverage Score: {:.2f}\tMax Score: {:.2f}\teps: {:.2f}'.format(
-                episode, np.mean(scores_window), max_score, epsilon), end="\r"
-            )
-            pass
+        #if episode % 100 == 0:
+        #    print('\rEpisode {}\tAverage Score: {:.2f}\tMax Score: {:.2f}\teps: {:.2f}'.format(
+        #        episode, np.mean(scores_window), max_score, epsilon), end="\r"
+        #    )
+        #    pass
+
+        #print("")
 
         if np.mean(scores_window) >= reward_solution_criteria:
             consecutive += 1
@@ -278,7 +366,12 @@ def train(
             model.save()
             break
     print("")
+
+    if not do_not_save:
+        model.save()
+
     return scores
+
 
 
 def main(
@@ -293,6 +386,7 @@ def main(
     experience_buffer: int            = DEFAULT_EXPERIENCE_BUFFER,
     model_name: str                   = "model",
     do_not_save:bool                  = False,
+    visual:bool                       = False,
 ) -> None:
     """
     Outerloop for training function. 
@@ -300,14 +394,18 @@ def main(
     Access the environment from disk
     """
 
-    if multi_agent:
+    if multi_agent and not visual:
         ENV_NAME = '/data/Reacher_Linux_NoVis/Reacher.x86_64'
-    else:
+    elif not multi_agent and not visual:
         ENV_NAME = '/data/Reacher_One_Linux_NoVis/Reacher.x86_64'
+    elif multi_agent and visual:
+        ENV_NAME = '/data/Reacher_Linux/Reacher.x86_64'
+    elif not multi_agent and visual:
+        ENV_NAME = '/data/Reacher_One_Linux/Reacher.x86_64'
 
     env = UnityEnvironment(file_name=ENV_NAME)
 
-    scores = train(
+    scores = train_eval(
         env,
         max_timesteps=max_timesteps,
         num_episodes=num_episodes,
@@ -317,6 +415,7 @@ def main(
         epsilon_end=epsilon_end,
         epsilon_decay=epsilon_decay,
         experience_buffer=experience_buffer,
+        do_not_save=do_not_save,
     )
 
     if not do_not_save:
@@ -445,6 +544,14 @@ if __name__ == '__main__':
         default=False
     )
 
+    parser.add_argument(
+        '-v',
+        '--visual',
+        help='Instantiate graphical environment to watch agent',
+        action='store_true',
+        default=False,
+    )
+
     args = parser.parse_args()
 
     main(
@@ -458,4 +565,5 @@ if __name__ == '__main__':
         experience_buffer=args.experience_buffer,
         multi_agent=args.multi_agent,
         do_not_save=args.do_not_save,
+        visual=args.visual,
     )
