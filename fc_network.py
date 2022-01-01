@@ -2,7 +2,6 @@ from typing import List, Callable
 
 import torch
 from torch  import nn
-import torch.nn.functional as F
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
@@ -26,16 +25,13 @@ class Network(nn.Module):
         #hidden_layers=[256,256,256,256],
         #hidden_layers:List[int]=[256,256,128,128,64,64,32],
         seed:int=1234,
-        internal_activation_fn:Callable=F.leaky_relu,
-        #internal_activation_fn=F.linear,
+        internal_activation_fn:Callable=nn.ReLU,
         #internal_activation_fn=None,
-        #output_activation_fn=torch.tanh,
-        output_activation_fn:Callable=torch.sigmoid,
-        #output_activation_fn=F.linear,
-        #output_activation_fn=F.leaky_relu,
+        output_activation_fn:Callable=nn.Tanh,
         #output_activation_fn=None,
         batch_size:int = 1,
-        layer_norm:bool=True
+        layer_norm:bool=False,
+        batch_norm:bool=False
     ):
         """
         Instantiate Neural Network to approximate action value function
@@ -49,9 +45,13 @@ class Network(nn.Module):
         """
         super().__init__()
         assert(len(hidden_layers) > 0)
-        self.seed = torch.manual_seed(seed)
+        self.seed = self.seed_func(seed)
+        self.input_size = input_size
+        self.output_size = output_size
+        self.cat_size = cat_size
         self.batch_size = batch_size
         self.hidden_layers = hidden_layers
+        self.batch_norm = batch_norm
 
         self.batch_norm_layers = []
         self.network_layers = []
@@ -66,50 +66,24 @@ class Network(nn.Module):
         between fully connected layers
         """
 
-        for layer_idx, _ in enumerate(self.hidden_layers):
+        self.network_layers.append(nn.Linear(input_size + cat_size, self.hidden_layers[0]))
 
-            # if this is the input layer
-            if layer_idx == 0:
+        self.network_layers.append(self.internal_activation_fn())
 
-                #if self.layer_norm: self.network_layers.append(nn.LayerNorm(input_size + cat_size))
+        for layer_idx in range(0, len(self.hidden_layers)-1):
 
-                if batch_size > 1:
-                    self.batch_norm_layers.append(nn.BatchNorm1d(input_size + cat_size))
+            self.network_layers.append(nn.Linear(self.hidden_layers[layer_idx], self.hidden_layers[layer_idx+1]))
 
-                self.network_layers.append(nn.Linear(input_size + cat_size, self.hidden_layers[0]))
-
-                #if self.layer_norm: self.network_layers.append(nn.LayerNorm(self.hidden_layers[0]))
+            self.network_layers.append(self.internal_activation_fn())
 
 
-            # this is an internal layer
-            else:
+        self.network_layers.append(nn.Linear(self.hidden_layers[-1], self.output_size))
 
-                if batch_size > 1:
-                    self.batch_norm_layers.append(nn.BatchNorm1d(self.hidden_layers[layer_idx-1]))
+        if self.output_activation_fn:
 
-                self.network_layers.append(nn.Linear(self.hidden_layers[layer_idx-1], self.hidden_layers[layer_idx]))
+            self.network_layers.append(self.output_activation_fn())
 
-                #if self.layer_norm: self.network_layers.append(nn.LayerNorm(self.hidden_layers[layer_idx]))
-
-        if batch_size > 1:
-            self.batch_norm_layers.append(nn.BatchNorm1d(self.hidden_layers[-1]))
-
-        #if layer_idx == len(self.hidden_layers):
-        #    self.network_layers.append(nn.Linear(input_size + cat_size, self.hidden_layers[0]))
-
-        #else:
-        #self.network_layers.append(nn.Linear(self.hidden_layers[layer_idx-1], self.hidden_layers[layer_idx]))
-
-        self.network_layers.append(nn.Linear(self.hidden_layers[-1], output_size))
-
-        #if batch_size > 1:
-        #    self.batch_norm_layers.append(nn.BatchNorm1d(self.hidden_layers[layer_idx]))
-
-        #if self.layer_norm: self.network_layers.append(nn.LayerNorm(output_size))
-
-
-        self.batch_norm_layers = nn.ModuleList(self.batch_norm_layers)
-        self.network_layers = nn.ModuleList(self.network_layers)
+        self.network_layers = nn.Sequential(*self.network_layers)
 
 
 
@@ -123,40 +97,16 @@ class Network(nn.Module):
         Returns - action value
         """
 
-        # activate state before concattonation
-        if self.internal_activation_fn:
-            x = self.internal_activation_fn(x)
-
         # if actions were supplied.. 
         if action is not None:
 
             # concatonate the actions on the 1st deminsion
             x = torch.cat((x, action), dim=1)
 
-        # for each layer
-        for layer_idx, layer in enumerate(self.network_layers):
-
-            # if batch size is greater than 1
-            if self.batch_size > 1:
-
-                # apply batch normalization
-                x = self.batch_norm_layers[layer_idx](x)
-
-            # apply the layer update
-            x = layer(x)
-
-            # if this is the last layer
-
-            # this is an internal layer
-            if self.internal_activation_fn and not isinstance(layer, nn.BatchNorm1d):
-
-                # Applay the internal activation function
-                x = self.internal_activation_fn(x)
-
-            if layer_idx == (len(self.network_layers) - 1):
-
-                # apply the output activation function
-                x = self.output_activation_fn(x)
-
+        x = self.network_layers(x)
 
         return x
+
+    def seed_func(self, seed):
+
+        torch.manual_seed(seed)

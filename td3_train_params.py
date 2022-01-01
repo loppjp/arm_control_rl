@@ -1,0 +1,117 @@
+DEFAULT_MAX_TIMESTEPS            = 500
+DEFAULT_NUM_EPISODES             = 1000
+DEFAULT_SCORE_WINDOW_EPISODES    = 100
+DEFAULT_STEP_SCORE_WINDOW        = 2000
+DEFAULT_REWARD_SOLUTION_CRITERIA = 30.0
+
+DEFAULT_EPSILON_START            = 1.0
+#DEFAULT_EPSILON_START            = 0.85
+#DEFAULT_EPSILON_START            = 0.5
+#DEFAULT_EPSILON_START            = 0.3
+#DEFAULT_EPSILON_START            = 0.5
+
+#DEFAULT_EPSILON_END              = 0.01
+#DEFAULT_EPSILON_END              = 0.05
+DEFAULT_EPSILON_END              = 0.025
+
+DEFAULT_EPSILON_DECAY_FACTOR     = 1.0
+#DEFAULT_EPSILON_DECAY_FACTOR     = 0.995
+#DEFAULT_EPSILON_DECAY_FACTOR     = 0.99
+#DEFAULT_EPSILON_DECAY_FACTOR     = 0.95
+#DEFAULT_EPSILON_DECAY_FACTOR     = 0.9
+
+#DEFAULT_BATCH_SIZE               = 2
+#DEFAULT_BATCH_SIZE               = 8
+#DEFAULT_BATCH_SIZE               = 16
+DEFAULT_BATCH_SIZE               = 256
+
+DEFAULT_HISTORIES                = 1
+#DEFAULT_HISTORIES                = 4
+#DEFAULT_HISTORIES                = 2
+#DEFAULT_HISTORIES                = 4
+#DEFAULT_HISTORIES                = 8
+#DEFAULT_HISTORIES                = 16
+
+DEFAULT_BOOTSTRAP                = 1
+#DEFAULT_BOOTSTRAP                = 2
+#DEFAULT_BOOTSTRAP                = 4
+#DEFAULT_BOOTSTRAP                = 8
+#DEFAULT_BOOTSTRAP                = 16
+#DEFAULT_BOOTSTRAP                = 32
+#DEFAULT_BOOTSTRAP                = 64
+
+DEFAULT_DECAY_STEPS               = 200000
+
+DEFAULT_DECAY_START               = 0.5
+DEFAULT_DECAY_END                 = 0.1
+
+#DEFAULT_EXPERIENCE_BUFFER        = 128 * 1024
+DEFAULT_EXPERIENCE_BUFFER        = 1024 * 1024
+#DEFAULT_EXPERIENCE_BUFFER        = 32 * 1024
+
+#DEFAULT_SOFT_UPDATE_POLICY_STEPS = 2 
+DEFAULT_SOFT_UPDATE_POLICY_STEPS = 5
+
+#DEFAULT_SOFT_UPDATE_VALUE_STEPS  = 2 
+DEFAULT_SOFT_UPDATE_VALUE_STEPS  = 5 
+
+DEFAULT_TRAIN_POLICY_STEPS       = 2
+
+DEFAULT_TRAIN_VALUE_STEPS     = 1
+#DEFAULT_TRAIN_VALUE_STEPS     = 16
+#DEFAULT_TRAIN_VALUE_STEPS     = 32
+#DEFAULT_TRAIN_VALUE_STEPS     = 256 
+
+DEFAULT_TRAIN_PASSES             = 1
+#DEFAULT_TRAIN_PASSES             = 64
+#DEFAULT_TRAIN_PASSES             = 128
+#DEFAULT_TRAIN_PASSES             = 256
+
+DEFAULT_MULTI_AGENT              = False
+
+#DEFAULT_LEARN_START_STEPS        = 1500
+DEFAULT_LEARN_START_STEPS        = DEFAULT_BATCH_SIZE * 5
+
+DEFAULT_POLICY_NOISE             = 0.1
+DEFAULT_POLICY_NOISE_CLIP        = 0.5
+
+TRAINING_PARAMS = {
+    "BATCH_SIZE":              DEFAULT_BATCH_SIZE,
+    "HISTORIES":               DEFAULT_HISTORIES,
+    "BOOTSTRAP":               DEFAULT_BOOTSTRAP,
+    "EXPERIENCE_BUFFER":       DEFAULT_EXPERIENCE_BUFFER,
+
+    #"GAMMA":                   0.9,
+    "GAMMA":                   0.95,
+
+    "TAU":                      5e-3,
+    #"TAU":                      2e-2,
+    #"TAU":                     1e-1,
+    #"TAU":                     1e-2,
+    #"TAU":                     5e-1,
+    #"TAU":                     1,
+    #"TAU":                     1e-1,
+
+    #"LEARNING_RATE":           1e-3,
+    #"LEARNING_RATE":           5e-4,
+    "LEARNING_RATE":           3e-4,
+    #"LEARNING_RATE":           1e-4,
+    #"LEARNING_RATE":           1e-5,
+    #"LEARNING_RATE":           1e-0,
+
+    "SOFT_UPDATE_POLICY_STEPS": DEFAULT_SOFT_UPDATE_POLICY_STEPS,
+    "SOFT_UPDATE_VALUE_STEPS":  DEFAULT_SOFT_UPDATE_VALUE_STEPS,
+
+    "TRAIN_POLICY_STEPS":      DEFAULT_TRAIN_POLICY_STEPS,
+    "TRAIN_VALUE_STEPS":       DEFAULT_TRAIN_VALUE_STEPS,
+    "TRAIN_PASSES":            DEFAULT_TRAIN_PASSES,
+    "SEED":                    int(1234),
+    "MODE":                    "TRAIN",
+    "LEARN_START":             DEFAULT_LEARN_START_STEPS,
+    "POLICY_NOISE":            DEFAULT_POLICY_NOISE,
+    "POLICY_NOISE_CLIP":       DEFAULT_POLICY_NOISE_CLIP,
+
+    "DECAY_STEPS":             DEFAULT_DECAY_STEPS,
+    "DECAY_START":             DEFAULT_DECAY_START,
+    "DECAY_END":               DEFAULT_DECAY_END,
+}

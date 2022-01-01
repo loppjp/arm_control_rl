@@ -1,7 +1,12 @@
+.vscode/*
+workspace.code-workspace
 .ipynb_checkpoints/*
 *.pyc
 
 *model*.png
-*model*.pt
+*model*.pth
 
 *.log
+*.pth
+*.csv
+*.ods

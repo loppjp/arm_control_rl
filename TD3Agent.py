@@ -6,9 +6,11 @@ from typing import Iterable
 
 import numpy as np
 import torch
-import torch.nn.functional as F
 
+from twin_fc_networks import Twin
 from fc_network import Network
+from noise import NormalDecayNoise
+
 from experience import Experience, ExperienceBuffer, ExperienceNotReady
 
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -23,7 +25,19 @@ DEBUG = {
     "SAMPLED_REWARD":False
 }
 
-class DDPGModel:
+class Model:
+    """
+    Wraps TD3 neural networks. There is an online model used for inference 
+    (sometimes) and a training model used for training updates.
+
+    Tested with continuous action spaces.
+
+    TD3 has a policy neural network to generate actions from an observation
+    of the environment state. It also has a state value network to estimate the 
+    value of a given state and action.
+
+    The state value network is a parallel twin of networks
+    """
 
     def __init__(self, state_size, action_size, training_params):
 
@@ -35,8 +49,8 @@ class DDPGModel:
         self.training_params = training_params
         self.state_history_queue = deque(maxlen=self.histories)
 
+        # prepopulate history buffer with random data since we wont have real experiences yet
         randgen = lambda: 2 * (np.random.random_sample((1, self.state_size)) - 0.5)
-
         [self.state_history_queue.append(randgen()) for _ in range(0, self.histories)]
 
         self.mode = self.training_params["MODE"]
@@ -47,6 +61,7 @@ class DDPGModel:
             self.action_size,
             seed=self.training_params["SEED"],
             batch_size=self.training_params["BATCH_SIZE"],
+            output_activation_fn=torch.nn.Tanh,
         ).to(device)
 
         # soft update only, no training
@@ -58,49 +73,73 @@ class DDPGModel:
             self.action_size,
             seed=self.training_params["SEED"],
             batch_size=self.training_params["BATCH_SIZE"],
+            output_activation_fn=torch.nn.Tanh,
         ).to(device)
 
         # State Value Network
-        self.state_value_net_online = Network(
+        self.state_value_net_online = Twin(
             self.state_size * self.histories,
             1,
+            #self.action_size,
             cat_size=self.action_size,
             seed=self.training_params["SEED"],
             batch_size=self.training_params["BATCH_SIZE"],
-            #output_activation_fn=F.leaky_relu,
-            output_activation_fn=lambda x:x,
+            output_activation_fn=None,
         ).to(device)
 
         # soft update only, no training
         self.state_value_net_online.eval()
 
         # State Value Network - for training
-        self.state_value_net_train = Network(
+        self.state_value_net_train = Twin(
             self.state_size * self.histories,
             1,
+            #self.action_size,
             cat_size=self.action_size,
             seed=self.training_params["SEED"],
             batch_size=self.training_params["BATCH_SIZE"],
-            #output_activation_fn=F.leaky_relu,
-            output_activation_fn=lambda x:x,
+            output_activation_fn=None,
         ).to(device)
 
+        # optimizer for policy network
         self.policy_optimizer = torch.optim.Adam(
             self.policy_net_train.parameters(), 
             lr=self.training_params["LEARNING_RATE"]
         )
 
+        # optimizer for state value network
         self.state_value_optimizer = torch.optim.Adam(
             self.state_value_net_train.parameters(), 
             lr=self.training_params["LEARNING_RATE"]
         )
 
+        # ensure policy network training and online network weights match
+        self.soft_update(
+            self.policy_net_online,
+            self.policy_net_train, 
+            1.0
+        )
+
+        # ensure state value network training and online network weights match
+        self.soft_update(
+            self.state_value_net_online, 
+            self.state_value_net_train, 
+            1.0,
+        )
+
+        # initialize some tensors to be used later
         self.gamma_tensor = torch.FloatTensor([self.training_params["GAMMA"]]).to(device)
+        self.torch_zeros = torch.zeros(()).to(device)
+        self.torch_ones = torch.ones(()).to(device)
+        self.torch_neg_ones = torch.Tensor([-1.0]).to(device)
+        self.policy_noise_clip = torch.FloatTensor([self.training_params["POLICY_NOISE_CLIP"]]).to(device)
 
 
     def sample_action(self, state: np.array):
         """
-        Sample the policy network by accessing its final output layer
+        Sample the policy network to determine the next action
+
+        Args: state - observation space
         """
 
         self.state_history_queue.append(state)
@@ -121,48 +160,69 @@ class DDPGModel:
             self, 
             state, 
             action,
-            next_state, 
             reward, 
+            next_state, 
             dones,
         ):
         """
-        Update the value functio neural network by computing
+        Update the value function neural network by computing
         the action function at the next state, given the reward
         and gamma
+
+        Implementation derived from TD3 implementation from Miguel Morales' 
+        Grokking Deep Reinforcement Learning. See: 
+        https://github.com/mimoralea/gdrl/blob/master/notebooks/chapter_12/chapter-12.ipynb
         """
 
-        # compute the state values 
+        with torch.no_grad():
 
-        #next_state_tensor = torch.FloatTensor(next_state).to(device)
+            #a_ran = 1.0 - (-1.0)
+            a_ran = self.torch_ones - self.torch_neg_ones
 
-        #argmax_a_q_sp = self.policy_net_target(next_state)
+            # target policy smoothing regularization noise.
+            # See TD3 Paper section 5.3
+            a_noise = torch.rand_like(action) * \
+                self.policy_noise_clip * a_ran
+            a_noise = a_noise.to(device)
 
-        self.policy_net_online.eval()
-        #self.policy_net_target.eval()
+            n_min = self.policy_noise_clip * self.torch_neg_ones
 
-        argmax_a_q_sp = self.policy_net_online(next_state)
+            n_max = self.policy_noise_clip * self.torch_ones
 
-        max_a_q_sp = self.state_value_net_online(next_state, action=argmax_a_q_sp)
+            # clip noise
+            a_noise = torch.max(torch.min(a_noise, n_max), n_min)
 
-        # 1-dones is already accounted for
-        target_q_sa = reward + max_a_q_sp * (1 - dones)
+            argmax_a_q_sp = self.policy_net_online(next_state)
 
-        # reward adjusted in experience recall
-        #target_q_sa = reward
+            noisy_argmax_a_q_sp = argmax_a_q_sp + a_noise
 
-        q_sa = self.state_value_net_train(state, action=action)
+            noisy_argmax_a_q_sp = torch.max(
+                torch.min(
+                    noisy_argmax_a_q_sp, self.torch_ones
+                ),
+                self.torch_neg_ones
+            )
 
-        td_error = q_sa - target_q_sa.detach()
+            max_a_q_sp_a, max_a_q_sp_b, *rest = self.state_value_net_online(
+                next_state, action=noisy_argmax_a_q_sp
+            )
 
-        value_loss = td_error.pow(2).mul(0.5).mean()
+            max_a_q_sp = torch.min(max_a_q_sp_a, max_a_q_sp_b)
 
-        if DEBUG["VALUE_LOSS"]:
-            with np.printoptions(
-                formatter={'float': '{:+2.6f}'.format}
-                ): print(f" value_loss: {value_loss.cpu().data.numpy()} ")
+            if self.bootstrap > 1:
+                target_q_sa = reward + max_a_q_sp
+            else:
+                target_q_sa = reward + self.gamma_tensor * max_a_q_sp * (1 - dones)
+
+
+        q_sp_a, q_sp_b, *_ = self.state_value_net_train(state, action)
+
+        td_error_a = q_sp_a - target_q_sa
+        td_error_b = q_sp_b - target_q_sa
+
+        value_loss = td_error_a.pow(2).mul(0.5).mean() + td_error_b.pow(2).mul(0.5).mean()
 
         self.state_value_optimizer.zero_grad()
-
         value_loss.backward()
 
         torch.nn.utils.clip_grad_norm_(self.state_value_net_train.parameters(), 
@@ -170,24 +230,18 @@ class DDPGModel:
 
         self.state_value_optimizer.step()
 
-        #V_s_estimated = self.state_value_net(
-        #    next_state,
-        #    action=action
-        #)
 
-        #reward_tensor = torch.FloatTensor(reward).to(device)
-
-        #V_s_prime_actual = reward + self.gamma_tensor * V_s_estimated
+        if DEBUG["VALUE_LOSS"]:
+            with np.printoptions(
+                formatter={'float': '{:+2.6f}'.format}
+                ): print(f" value_loss: {value_loss.cpu().data.numpy()} ")
 
 
+    def soft_update_value(self):
+        """
+        gentle updates to the state value network
+        """
 
-        #loss = self.loss(V_s_prime_actual, V_s_estimated)
-        #self.state_value_optimizer.zero_grad()
-        #loss.backward()
-        #self.state_value_optimizer.step()
-
-        # ------------------- update target network ------------------- #
-        #self.soft_update(self.state_value_net, self.state_value_net_target, self.training_params["TAU"])                     
         self.soft_update(
             self.state_value_net_online, 
             self.state_value_net_train, 
@@ -200,8 +254,8 @@ class DDPGModel:
             self, 
             state, 
             action, 
-            next_state, 
             reward,
+            next_state, 
         ) -> None:
         """
         Update the policy neural network by computing the 
@@ -210,32 +264,12 @@ class DDPGModel:
         the reward and gamma
         """
 
-        #state_tensor = torch.FloatTensor([state]).to(device)
-        
-        #next_state_tensor = torch.FloatTensor([next_state]).to(device)
-
-        #reward_tensor = torch.FloatTensor([reward]).to(device)
-
-        #print(f"update_policy: state.size(): {state.size()}")
-
-        #V_s = self.state_value_net(state, action=action)
-
-        #V_s_prime = self.state_value_net(next_state, action=action)
-
-        #A = reward + self.gamma_tensor * (V_s_prime - V_s)
-        #A = reward_tensor + self.gamma_tensor * V_s_prime - V_s
-
-        #argmax_a_q_s = self.policy_net_target(state)
-
-        #max_a_q_s = self.state_value_net_target(state, action=argmax_a_q_s)
-
+        # produces different results
         #argmax_a_q_s = self.policy_net_target(state)
         argmax_a_q_s = self.policy_net_train(state)
 
-        max_a_q_s = self.state_value_net_online(state, action=argmax_a_q_s)
+        max_a_q_s = self.state_value_net_train.a_net(state, action=argmax_a_q_s)
 
-        # target 0 loss?
-        #loss = self.loss(A, torch.zeros_like(A))
         policy_loss = -max_a_q_s.mean()
         self.policy_optimizer.zero_grad()
         policy_loss.backward()
@@ -243,8 +277,12 @@ class DDPGModel:
                                        float('inf'))  
         self.policy_optimizer.step() 
 
-        # ------------------- update target network ------------------- #
-        #self.soft_update(self.policy_net, self.policy_net_target, self.training_params["TAU"])                     
+
+    def soft_update_policy(self):
+        """
+        gentle updates to the state value network
+        """
+
         self.soft_update(
             self.policy_net_online,
             self.policy_net_train, 
@@ -278,7 +316,6 @@ class DDPGModel:
         torch.save(self.policy_net_online.state_dict(), policy_net_name)
         torch.save(self.state_value_net_online.state_dict(), state_value_net_name)
 
-
     def load(
             self,
             policy_net:Path='policy_model.pth',
@@ -287,13 +324,11 @@ class DDPGModel:
         """
         Load model weights from disk
         """
-        with open(policy_net, 'r') as f:
-            self.policy_net_online = torch.load(f)
-            self.policy_net_train = torch.load(f)
+        self.policy_net_online.load_state_dict(torch.load(policy_net))
+        self.policy_net_train.load_state_dict(torch.load(policy_net))
 
-        with open(state_value_net, 'r') as f:
-            self.state_value_net_online = torch.load(f)
-            self.state_value_net_train = torch.load(f)
+        self.state_value_net_online.load_state_dict(torch.load(state_value_net))
+        self.state_value_net_train.load_state_dict(torch.load(state_value_net))
 
 
 def sum_data(tensor):
@@ -306,7 +341,7 @@ def sum_data(tensor):
 
     return float(z)
 
-class DDPGAgent:
+class Agent:
 
     def __init__(
             self, 
@@ -336,6 +371,8 @@ class DDPGAgent:
 
         # memory buffer for experience
         self.mem_buffer = ExperienceBuffer(
+            self.state_size,
+            self.action_size,
             self.model.training_params["BATCH_SIZE"],
             self.model.training_params["EXPERIENCE_BUFFER"],
             self.model.training_params["HISTORIES"],
@@ -348,6 +385,14 @@ class DDPGAgent:
 
         # initialize time step for training updates
         self.t_step = 0
+
+        # Exploration Noise
+        self.normal_decay_noise = NormalDecayNoise(
+            self.action_size,
+            max_noise=self.model.training_params["DECAY_START"],
+            min_noise=self.model.training_params["DECAY_END"],
+            decay_steps=self.model.training_params["DECAY_STEPS"],
+        )
 
     def reset(self):
         """
@@ -366,20 +411,11 @@ class DDPGAgent:
         
         if np.random.random() < epsilon: 
 
-            #print(" rand ", end="")
-
-            noise = (np.random.normal(
-                loc=0,
-                scale=self.model.training_params["POLICY_NOISE"],
-                size=(1, self.action_size)
-            ))
+            noise = self.normal_decay_noise(self.t_step)
 
             action += noise
 
-            action = np.clip(action, 0 , 1.0)
-
-        # if output activation sigmoid, adjust
-        action = action * 2 - 1
+            action = np.clip(action, -1.0, 1.0)
 
         self.last_action = action
 
@@ -395,6 +431,7 @@ class DDPGAgent:
                 ): print(f" action: {action} ")
 
         return action
+
 
     def step(
         self,
@@ -420,24 +457,30 @@ class DDPGAgent:
             f.write(f"{reward:+2.6}, ")
             f.write('\n')
 
-        self.mem_buffer.add_single(
-            Experience(
-                state,
-                action,
-                reward,
-                next_state,
-                done
-            )
+        experiece_to_store = Experience(
+            state,
+            action,
+            reward,
+            next_state,
+            done
         )
 
+        self.mem_buffer.add_single(experiece_to_store)
+
+        #self.replay_buffer.store(experiece_to_store)
+
         self.t_step = self.t_step + 1
-        do_train = self.t_step % self.model.training_params["TRAIN_INTERVAL_STEPS"] == 0
-        do_train = do_train and (self.t_step > self.model.training_params["LEARN_START"])
+
+        do_train_value = self.t_step % self.model.training_params["TRAIN_VALUE_STEPS"] == 0
+        do_train_value = do_train_value and (self.t_step > self.model.training_params["LEARN_START"])
+
+        do_train_policy = self.t_step % self.model.training_params["TRAIN_POLICY_STEPS"] == 0
+        do_train_policy = do_train_policy and (self.t_step > self.model.training_params["LEARN_START"])
         #do_train = True
         
 
 
-        if "TRAIN" == self.model.training_params["MODE"].upper() and do_train:
+        if "TRAIN" == self.model.training_params["MODE"].upper() and do_train_value:
 
             for _ in range(0, self.model.training_params["TRAIN_PASSES"]):
 
@@ -445,41 +488,71 @@ class DDPGAgent:
 
                     experiences = self.mem_buffer.sample()
 
-                    states, actions, rewards, next_states, done = experiences
+                    exp_states, exp_actions, exp_rewards, exp_next_states, exp_dones = experiences
 
                     if DEBUG["SAMPLED_REWARD"]:
                         with np.printoptions(
                             formatter={'float': '{:+2.6f}'.format}
-                            ): print(f" reward: {rewards.cpu().data.numpy()} ")
+                            ): print(f" reward: {exp_rewards.cpu().data.numpy()} ")
 
                     self.model.update_state_value_estimate(
-                        states,
-                        actions,
-                        next_states,
-                        rewards,
-                        done,
-                    )
-
-                    self.model.update_policy(
-                        states,
-                        actions,
-                        next_states,
-                        rewards,
+                        exp_states,
+                        exp_actions,
+                        exp_rewards,
+                        exp_next_states,
+                        exp_dones,
                     )
 
                 except ExperienceNotReady:
                     pass # not quite ready to train, its ok ...
 
-                if DEBUG["NETWORKS"]:
 
-                    self.last_value_net_sum = self.model.policy_net_online.parameters()
+        if self.t_step % self.model.training_params["SOFT_UPDATE_VALUE_STEPS"] == 0:
 
-                    policy_net_train_sum = sum_data(self.model.policy_net_train.parameters())
-                    policy_net_online_sum = sum_data(self.model.policy_net_online.parameters())
-                    state_value_net_train_sum = sum_data(self.model.state_value_net_train.parameters())
-                    state_value_net_online_sum = sum_data(self.model.state_value_net_online.parameters())
+            self.model.soft_update_value()
 
-                    print(f"policy_net_train_sum: {policy_net_train_sum:4.6f} ", end="")
-                    print(f" policy_net_online_sum: {policy_net_online_sum:4.6f}", end="")
-                    print(f" state_value_net_train_sum: {state_value_net_train_sum:4.6f}", end="")
-                    print(f" state_value_net_online_sum: {state_value_net_online_sum:4.6f}")
+
+        if "TRAIN" == self.model.training_params["MODE"].upper() and do_train_policy:
+
+            for _ in range(0, self.model.training_params["TRAIN_PASSES"]):
+
+                try:
+
+                    experiences = self.mem_buffer.sample()
+
+                    exp_states, exp_actions, exp_rewards, exp_next_states, exp_dones = experiences
+
+                    if DEBUG["SAMPLED_REWARD"]:
+                        with np.printoptions(
+                            formatter={'float': '{:+2.6f}'.format}
+                            ): print(f" reward: {exp_rewards.cpu().data.numpy()} ")
+
+                    self.model.update_policy(
+                        exp_states,
+                        exp_actions,
+                        exp_rewards,
+                        exp_next_states,
+                    )
+
+                except ExperienceNotReady:
+                    pass # not quite ready to train, its ok ...
+
+
+        if self.t_step % self.model.training_params["SOFT_UPDATE_POLICY_STEPS"] == 0:
+
+            self.model.soft_update_policy()
+
+
+        if (do_train_policy or do_train_value) and DEBUG["NETWORKS"]:
+
+            self.last_value_net_sum = self.model.policy_net_online.parameters()
+
+            policy_net_train_sum = sum_data(self.model.policy_net_train.parameters())
+            policy_net_online_sum = sum_data(self.model.policy_net_online.parameters())
+            state_value_net_train_sum = sum_data(self.model.state_value_net_train.parameters())
+            state_value_net_online_sum = sum_data(self.model.state_value_net_online.parameters())
+
+            print(f"policy_net_train_sum: {policy_net_train_sum:4.6f} ", end="")
+            print(f" policy_net_online_sum: {policy_net_online_sum:4.6f}", end="")
+            print(f" state_value_net_train_sum: {state_value_net_train_sum:4.6f}", end="")
+            print(f" state_value_net_online_sum: {state_value_net_online_sum:4.6f}")
