@@ -3,7 +3,7 @@
 ## Learning Algorithm
 </br>
 
-The agent algorithm implemented here was Twin Delayed Deep Deterministic policy gradient algorithm (TD3). This algorithm features neural networks as function approximators. One function approximator acts as the agent's policy; selecting the action parameters each timestep. The other function approximator is responsible for estimating the value of a state-action combination. TD3 is typically used for continuous action spaces, where the agent provides real valued (as opposed to discrete) actions to the environment. It is a policy gradient based agent that is attempting to maximize performance of its policy. The state-action function, typically refered to as the "critic" evaluates the 
+The agent algorithm implemented here was Twin Delayed Deep Deterministic policy gradient algorithm (TD3). This algorithm features neural networks as function approximators. One function approximator acts as the agent's policy; selecting the action parameters each timestep. The other function approximator is responsible for estimating the value of a state-action combination. TD3 is typically used for continuous action spaces, where the agent provides real valued (as opposed to discrete) actions to the environment. It is a policy gradient based agent that is attempting to maximize performance of its policy. The state-action function, typically refered to as the "critic" evaluates how well the policy is doing by learning to assign a value of a state action pair. It uses a TD estimate to do this, comparing the sampled trajectory to what the function approximator produces.
 </br>
 </br>
 
